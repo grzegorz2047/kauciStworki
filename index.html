@@ -115,96 +115,37 @@ $("add").addEventListener("click",()=>collect($("ean").value));$("ean").addEvent
 $("export").addEventListener("click",()=>{const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="kaucja-stworki-zapis.json";a.click();URL.revokeObjectURL(url);message("Przygotowano kopię zapisu.")});
 $("reset").addEventListener("click",async()=>{if(confirm("Na pewno usunąć całą kolekcję z tej przeglądarki? Tej operacji nie można cofnąć.")){state={version:1,xp:0,scans:0,entries:{}};await store.save(state);render();message("Zapis wyczyszczony.")}});
 async function startCamera(){
-  if(scanSucceeded){scanSucceeded=false}
+  if(scanSucceeded)scanSucceeded=false;
   const generation=++scanGeneration;
-  if(!window.isSecureContext){
-    message("Kamera wymaga bezpiecznego połączenia HTTPS. Otwórz stronę przez https://.");
-    return;
-  }
-  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    message("Ta przeglądarka nie udostępnia kamery. Otwórz stronę w aktualnym Safari.");
-    return;
-  }
-  if(!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatReader){
-    message("Nie załadował się skaner kodów (ZXing). Sprawdź połączenie z internetem i odśwież stronę.");
-    return;
-  }
+  if(!window.isSecureContext){message("Kamera wymaga HTTPS. Otwórz stronę przez https://.");return;}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){message("Przeglądarka nie udostępnia kamery. Otwórz stronę w aktualnym Safari lub Chrome i sprawdź HTTPS.");return;}
   try{
     $("start").disabled=true;
-    $("video").classList.add("active");
-    // Give product-barcode decoding more effort and limit formats to common retail codes.
-    const hints=new Map();
-    const Hint=ZXingBrowser.DecodeHintType;
-    const Format=ZXingBrowser.BarcodeFormat;
+    message("Prośba o dostęp do kamery… Jeśli przeglądarka zapyta, wybierz „Zezwól”.");
+    // Ask for camera permission before checking the decoder CDN.
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30},advanced:[{focusMode:"continuous"},{exposureMode:"continuous"},{whiteBalanceMode:"continuous"}]},audio:false});
+    if(generation!==scanGeneration){stream.getTracks().forEach(t=>t.stop());stream=null;return;}
+    const video=$("video");video.srcObject=stream;video.classList.add("active");await video.play();$("stop").disabled=false;
+    if(!window.ZXingBrowser||!window.ZXingBrowser.BrowserMultiFormatReader){message("Kamera jest włączona, ale biblioteka skanera nie załadowała się. Sprawdź internet i odśwież stronę.");return;}
+    const hints=new Map(),Hint=ZXingBrowser.DecodeHintType,Format=ZXingBrowser.BarcodeFormat;
     if(Hint&&Hint.TRY_HARDER)hints.set(Hint.TRY_HARDER,true);
-    if(Hint&&Hint.POSSIBLE_FORMATS&&Format){
-      const formats=[Format.EAN_13,Format.EAN_8,Format.UPC_A,Format.UPC_E,Format.CODE_128,Format.ITF].filter(Boolean);
-      if(formats.length)hints.set(Hint.POSSIBLE_FORMATS,formats);
-    }
+    if(Hint&&Hint.POSSIBLE_FORMATS&&Format){const formats=[Format.EAN_13,Format.EAN_8,Format.UPC_A,Format.UPC_E,Format.CODE_128,Format.ITF].filter(Boolean);if(formats.length)hints.set(Hint.POSSIBLE_FORMATS,formats);}
     const reader=new ZXingBrowser.BrowserMultiFormatReader(hints.size?hints:undefined,{delayBetweenScanAttempts:100,delayBetweenScanSuccess:350});
-    message("Uruchamiam kamerę i skaner kodów…");
-    // Let ZXing acquire the camera and attach its stream to the preview itself.
-    // This is the library's standard path and avoids attaching the same stream twice on iOS Safari.
-    scanAttempts=0;lastScanDebug=Date.now();
-    const onDecode=(result,error)=>{
-      if(generation!==scanGeneration||scanSucceeded)return;
-      scanAttempts++;
-      if(result){
-        const code=result.getText();
-        if(code && code!==scanTimer){
-          scanSucceeded=true;
-          scanTimer=code;
-          scanGeneration++;
-          if(zxingControls){try{zxingControls.stop()}catch{}zxingControls=null}
-          const video=$("video");
-          const tracks=video.srcObject&&video.srcObject.getTracks?video.srcObject.getTracks():[];
-          tracks.forEach(track=>track.stop());
-          video.srcObject=null;
-          video.classList.remove("active");
-          $("start").disabled=false;
-          $("stop").disabled=true;
-          collect(code).then(()=>{scanTimer=null}).catch(()=>message("Odczytano kod, ale nie udało się zapisać wyniku."));
-          return;
-        }
-      }
-      // Misses are normal while the camera is looking for a barcode.
-      const errorText=error&&String(error.message||error);
-      const normalMiss=!!(!result && errorText && /No MultiFormat Readers were able to detect the code|NotFoundException/i.test(errorText));
-      if(error && !normalMiss && !["NotFoundException","ChecksumException","FormatException","e"].includes(error.name)){
-        message("Błąd dekodera: "+(error.name||"nieznany")+" — "+(error.message||"brak szczegółów"));
-      }else if(Date.now()-lastScanDebug>4000){
-        lastScanDebug=Date.now();
-        const video=$("video");
-        const track=video.srcObject&&video.srcObject.getVideoTracks?video.srcObject.getVideoTracks()[0]:null;
-        const settings=track&&track.getSettings?track.getSettings():{};
-        message("Skaner analizuje obraz ("+(video.videoWidth||0)+"×"+(video.videoHeight||0)+", prób: "+scanAttempts+(settings.facingMode?", kamera: "+settings.facingMode:"")+"). Ustaw kod poziomo, wypełnij nim kadr i unikaj odblasków.");
-      }
-    };
-    // Prefer the rear camera on phones instead of accepting the browser's default camera.
-    zxingControls=await reader.decodeFromConstraints(
-      {video:{
-        facingMode:{ideal:"environment"},
-        width:{ideal:1920},
-        height:{ideal:1080},
-        frameRate:{ideal:30},
-        advanced:[{focusMode:"continuous"},{exposureMode:"continuous"},{whiteBalanceMode:"continuous"}]
-      }},
-      $("video"),
-      onDecode
-    );
-    $("stop").disabled=false;
-    message("Skaner działa. Czytnik używa dokładniejszego trybu dekodowania i automatycznej ostrości, jeśli kamera ją obsługuje.");
+    scanAttempts=0;lastScanDebug=Date.now();message("Kamera działa — szukam kodu kreskowego…");
+    zxingControls=await reader.decodeFromStream(stream,video,(result,error)=>{
+      if(generation!==scanGeneration||scanSucceeded)return;scanAttempts++;
+      if(result){const code=result.getText();if(code&&code!==scanTimer){scanSucceeded=true;scanTimer=code;scanGeneration++;if(zxingControls){try{zxingControls.stop()}catch{}zxingControls=null;}stopCamera();collect(code).then(()=>{scanTimer=null;}).catch(()=>message("Odczytano kod, ale nie udało się zapisać wyniku."));return;}}
+      const errorText=error&&String(error.message||error),normalMiss=!!(!result&&errorText&&/No MultiFormat Readers were able to detect the code|NotFoundException/i.test(errorText));
+      if(error&&!normalMiss&&!["NotFoundException","ChecksumException","FormatException","e"].includes(error.name)){message("Błąd odczytu: "+(error.name||"nieznany")+" — "+(error.message||"brak szczegółów"));}
+      else if(Date.now()-lastScanDebug>4000){lastScanDebug=Date.now();const track=stream&&stream.getVideoTracks?stream.getVideoTracks()[0]:null,settings=track&&track.getSettings?track.getSettings():{};message("Skaner analizuje obraz ("+(video.videoWidth||0)+"×"+(video.videoHeight||0)+", prób: "+scanAttempts+(settings.facingMode?", kamera: "+settings.facingMode:"")+"). Ustaw kod poziomo, wypełnij nim kadr i unikaj odblasków.");}
+    });
+    message("Skaner działa. Ustaw kod kreskowy w kadrze.");
   }catch(e){
     const name=e&&e.name?e.name:"";
-    if(name==="NotAllowedError"||name==="SecurityError"){
-      message("Brak dostępu do kamery. Zezwól na kamerę w ustawieniach Safari dla tej strony.");
-    }else if(name==="NotFoundError"||name==="DevicesNotFoundError"){
-      message("Nie znaleziono kamery w tym urządzeniu.");
-    }else if(name==="NotReadableError"||name==="TrackStartError"){
-      message("Kamera jest zajęta przez inną aplikację. Zamknij ją i spróbuj ponownie.");
-    }else{
-      message("Nie udało się uruchomić skanera ("+(name||"błąd nieznany")+"). Odśwież stronę i spróbuj ponownie.");
-    }
+    if(name==="NotAllowedError"||name==="SecurityError")message("Brak dostępu do kamery. Zezwól na kamerę w ustawieniach przeglądarki dla tej strony, a potem spróbuj ponownie.");
+    else if(name==="NotFoundError"||name==="DevicesNotFoundError")message("Nie znaleziono kamery w tym urządzeniu.");
+    else if(name==="NotReadableError"||name==="TrackStartError")message("Kamera jest zajęta przez inną aplikację. Zamknij ją i spróbuj ponownie.");
+    else message("Nie udało się uruchomić kamery ("+(name||"błąd nieznany")+"). Sprawdź uprawnienia i HTTPS.");
     stopCamera();
   }
 }
